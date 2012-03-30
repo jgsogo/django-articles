@@ -15,8 +15,14 @@ from django.conf import settings
 from django.template.defaultfilters import slugify, striptags
 from django.utils.translation import ugettext_lazy as _
 
-from decorators import logtime, once_per_instance
+from articles.decorators import logtime, once_per_instance
 
+USE_TAGGIT = 'taggit' in settings.INSTALLED_APPS
+if USE_TAGGIT:
+    from taggit.managers import TaggableManager
+    from taggit.models import Tag
+        
+        
 WORD_LIMIT = getattr(settings, 'ARTICLES_TEASER_LIMIT', 75)
 AUTO_TAG = getattr(settings, 'ARTICLES_AUTO_TAG', True)
 DEFAULT_DB = getattr(settings, 'ARTICLES_DEFAULT_DB', 'default')
@@ -71,47 +77,70 @@ def get_name(user):
     return name
 User.get_name = get_name
 
-class Tag(models.Model):
-    name = models.CharField(max_length=64, unique=True)
-    slug = models.CharField(max_length=64, unique=True, null=True, blank=True)
+if USE_TAGGIT:
+    """ Adding some functions to taggit's Tag model to reduce modifications in django-articles """
+    if not getattr(Tag, 'rss_name', None):
+        log.debug('Adding rss_name method to model Tag')
+        @property
+        def rss_name(self):
+            return self.cleaned
+        Tag.rss_name = rss_name
+    if not getattr(Tag, 'cleaned', None):
+        log.debug('Adding cleaned method to model Tag')
+        @property
+        def cleaned(self):
+            return self.slug or Tag.clean_tag(self_name)
+        Tag.cleaned = cleaned
+    if not getattr(Tag, 'get_absolute_url', None):
+        log.debug('Adding get_absolute_url method to model Tag')
+        @models.permalink
+        def get_absolute_url(self):
+            log.debug('Tag::get_absolute_url for %s' % self)
+            return ('articles_display_tag', (self.cleaned,))
+        Tag.get_absolute_url = get_absolute_url
 
-    def __unicode__(self):
-        return self.name
+else:
+    class Tag(models.Model):
+        name = models.CharField(max_length=64, unique=True)
+        slug = models.CharField(max_length=64, unique=True, null=True, blank=True)
 
-    @staticmethod
-    def clean_tag(name):
-        """Replace spaces with dashes, in case someone adds such a tag manually"""
+        def __unicode__(self):
+            return self.name
 
-        name = name.replace(' ', '-').encode('ascii', 'ignore')
-        name = TAG_RE.sub('', name)
-        clean = name.lower().strip()
+        @staticmethod
+        def clean_tag(name):
+            """Replace spaces with dashes, in case someone adds such a tag manually"""
 
-        log.debug('Cleaned tag "%s" to "%s"' % (name, clean))
-        return clean
+            name = name.replace(' ', '-').encode('ascii', 'ignore')
+            name = TAG_RE.sub('', name)
+            clean = name.lower().strip()
 
-    def save(self, *args, **kwargs):
-        """Cleans up any characters I don't want in a URL"""
+            log.debug('Cleaned tag "%s" to "%s"' % (name, clean))
+            return clean
 
-        log.debug('Ensuring that tag "%s" has a slug' % (self,))
-        self.slug = Tag.clean_tag(self.name)
-        super(Tag, self).save(*args, **kwargs)
+        def save(self, *args, **kwargs):
+            """Cleans up any characters I don't want in a URL"""
 
-    @models.permalink
-    def get_absolute_url(self):
-        return ('articles_display_tag', (self.cleaned,))
+            log.debug('Ensuring that tag "%s" has a slug' % (self,))
+            self.slug = Tag.clean_tag(self.name)
+            super(Tag, self).save(*args, **kwargs)
 
-    @property
-    def cleaned(self):
-        """Returns the clean version of the tag"""
+        @models.permalink
+        def get_absolute_url(self):
+            return ('articles_display_tag', (self.cleaned,))
 
-        return self.slug or Tag.clean_tag(self.name)
+        @property
+        def cleaned(self):
+            """Returns the clean version of the tag"""
 
-    @property
-    def rss_name(self):
-        return self.cleaned
+            return self.slug or Tag.clean_tag(self.name)
 
-    class Meta:
-        ordering = ('name',)
+        @property
+        def rss_name(self):
+            return self.cleaned
+
+        class Meta:
+            ordering = ('name',)
 
 class ArticleStatusManager(models.Manager):
 
@@ -187,7 +216,11 @@ class Article(models.Model):
     content = models.TextField()
     rendered_content = models.TextField()
 
-    tags = models.ManyToManyField(Tag, help_text=_('Tags that describe this article'), blank=True)
+    if USE_TAGGIT:
+        tags = TaggableManager(blank=True)
+    else:
+        tags = models.ManyToManyField(Tag, help_text=_('Tags that describe this article'), blank=True)
+        
     auto_tag = models.BooleanField(default=AUTO_TAG, blank=True, help_text=_('Check this if you want to automatically assign any existing tags to this article based on its content.'))
     followup_for = models.ManyToManyField('self', symmetrical=False, blank=True, help_text=_('Select any other articles that this article follows up on.'), related_name='followups')
     related_articles = models.ManyToManyField('self', blank=True)
@@ -316,7 +349,7 @@ class Article(models.Model):
 
     @logtime
     @once_per_instance
-    def do_auto_tag(self, using=DEFAULT_DB):
+    def do_auto_tag(self, using=DEFAULT_DB):        
         """
         Performs the auto-tagging work if necessary.
 

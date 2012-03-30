@@ -1,3 +1,5 @@
+import logging
+
 from django import template
 from django.core.cache import cache
 from django.core.urlresolvers import resolve, reverse, Resolver404
@@ -279,7 +281,7 @@ def tag_cloud():
             # go no further
             return {}
 
-        min_count = max_count = tags[0].article_set.count()
+        min_count = max_count = Article.objects.filter(tags__slug__in=[tags[0]]).count()
         for tag in tags:
             if tag.count < min_count:
                 min_count = tag.count
